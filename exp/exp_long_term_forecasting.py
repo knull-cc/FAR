@@ -23,16 +23,19 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
 
-        if self.args.use_multi_gpu and self.args.use_gpu:
-            model = nn.DataParallel(model, device_ids=self.args.device_ids)
-            
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
         
         model.prepare_dataset(train_data, vali_data, test_data)
+
+        if self.args.use_multi_gpu and self.args.use_gpu:
+            model = nn.DataParallel(model, device_ids=self.args.device_ids)
         
         return model
+
+    def _unwrap_model(self, model):
+        return model.module if isinstance(model, nn.DataParallel) else model
 
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag)
@@ -105,7 +108,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             scaler = torch.cuda.amp.GradScaler()
 
         best_valid_loss = float('inf')
-        best_model = None
+        best_model_state = None
             
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -169,21 +172,28 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             # We do not use early stopping
             
             if vali_loss < best_valid_loss:
-                best_model = copy.deepcopy(self.model)
+                best_model_state = copy.deepcopy(self._unwrap_model(self.model).state_dict())
                 best_valid_loss = vali_loss
                 
-        best_model_path = path + '/' + 'checkpoint.pth'
-        torch.save(best_model.state_dict(), best_model_path)
-#         self.model.load_state_dict(torch.load(best_model_path))
+        if best_model_state is None:
+            best_model_state = copy.deepcopy(self._unwrap_model(self.model).state_dict())
 
-#         return self.model
-        return best_model
+        best_model_path = path + '/' + 'checkpoint.pth'
+        torch.save(best_model_state, best_model_path)
+        self._unwrap_model(self.model).load_state_dict(best_model_state)
+
+        return self.model
 
     def test(self, setting, test=0):
         test_data, test_loader = self._get_data(flag='test')
         if test:
             print('loading model')
-            self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
+            self._unwrap_model(self.model).load_state_dict(
+                torch.load(
+                    os.path.join('./checkpoints/' + setting, 'checkpoint.pth'),
+                    map_location=self.device,
+                )
+            )
 
         preds = []
         trues = []

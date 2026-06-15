@@ -71,6 +71,7 @@ class Model(nn.Module):
             use_covariates=use_covariates,
             cov_channels=cov_channels,
             far_config=far_config,
+            num_workers=getattr(configs, 'retrieval_num_workers', 0),
         )
         
         self.period_num = self.rt.period_num[-1 * self.n_period:]

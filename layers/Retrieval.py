@@ -25,6 +25,7 @@ class RetrievalTool():
         use_covariates=False,
         cov_channels=0,
         far_config=None,
+        num_workers=0,
     ):
         period_num = [16, 8, 4, 2, 1]
         period_num = period_num[-1 * n_period:]
@@ -41,6 +42,7 @@ class RetrievalTool():
         
         self.with_dec = with_dec
         self.return_key = return_key
+        self.num_workers = num_workers
 
         # ---- FAR (Future-Aligned Retrieval) configuration --------------------
         # When use_far is True, the past-similarity correlation key is replaced
@@ -272,13 +274,13 @@ class RetrievalTool():
         return pred_from_retrieval, topk_sims
     
     def retrieve_all(self, data, train=False, device=torch.device('cpu')):
-        assert(self.train_data_all_mg != None)
+        assert self.train_data_all_mg is not None
         
         rt_loader = DataLoader(
             data,
             batch_size=1024,
             shuffle=False,
-            num_workers=8,
+            num_workers=self.num_workers,
             drop_last=False
         )
         
