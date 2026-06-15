@@ -61,7 +61,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'RAFT':
+                if self.args.model == 'FAR':
                     outputs = self.model(batch_x, index, mode='valid')
                 else:
                     if self.args.use_amp:
@@ -126,7 +126,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 # encoder - decoder
-                if self.args.model == 'RAFT':
+                if self.args.model == 'FAR':
                     outputs = self.model(batch_x, index, mode='train')
                 else:
                     if self.args.use_amp:
@@ -204,7 +204,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'RAFT':
+                if self.args.model == 'FAR':
                     outputs = self.model(batch_x, index, mode='test')
                 else:
                     if self.args.use_amp:

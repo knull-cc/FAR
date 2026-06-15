@@ -3,10 +3,16 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from layers.Retrieval import RetrievalTool
+from far.gating import RetrievalGate
 
 class Model(nn.Module):
     """
     Paper link: https://arxiv.org/pdf/2205.13504.pdf
+
+    RAFT host augmented with FAR (Future-Aligned Retrieval). When configs.use_far
+    is set, the retrieval similarity is computed by a contrastively-trained,
+    future-aligned encoder instead of past-waveform correlation. The fusion head
+    is unchanged (FAR is a plug-in retriever, not a backbone).
     """
 
     def __init__(self, configs, individual=False):
@@ -14,7 +20,7 @@ class Model(nn.Module):
         individual: Bool, whether shared model among different variates.
         """
         super(Model, self).__init__()
-        self.device = torch.device(f'cuda:{configs.gpu}')
+        self.device = torch.device(f'cuda:{configs.gpu}') if torch.cuda.is_available() else torch.device('cpu')
         self.task_name = configs.task_name
         self.seq_len = configs.seq_len
         if self.task_name == 'classification' or self.task_name == 'anomaly_detection' or self.task_name == 'imputation':
@@ -30,13 +36,41 @@ class Model(nn.Module):
         
         self.n_period = configs.n_period
         self.topm = configs.topm
-        
+
+        # ---- FAR configuration -----------------------------------------------
+        self.use_far = getattr(configs, 'use_far', False)
+        self.use_gating = getattr(configs, 'far_use_gating', False) and self.use_far
+        far_config = {
+            'emb_dim': getattr(configs, 'far_emb_dim', 128),
+            'd_model': getattr(configs, 'far_d_model', 128),
+            'n_blocks': getattr(configs, 'far_n_blocks', 3),
+            'dropout': getattr(configs, 'far_dropout', 0.1),
+            'use_revin': bool(getattr(configs, 'far_use_revin', 1)),
+            'temperature': getattr(configs, 'far_temperature', 0.1),
+            'pos_k': getattr(configs, 'far_pos_k', 5),
+            'future_metric': getattr(configs, 'far_future_metric', 'shape'),
+            'soft_dtw_gamma': getattr(configs, 'far_soft_dtw_gamma', 0.1),
+            'use_hard_neg': getattr(configs, 'far_use_hard_neg', False),
+            'hard_scale': getattr(configs, 'far_hard_scale', 3.0),
+            'use_gating': self.use_gating,
+            'epochs': getattr(configs, 'far_epochs', 10),
+            'batch_size': getattr(configs, 'far_batch_size', 256),
+            'lr': getattr(configs, 'far_lr', 1e-3),
+        }
+        use_covariates = getattr(configs, 'far_use_covariates', False) and self.use_far
+        # number of time-feature covariate channels (from data_stamp)
+        cov_channels = getattr(configs, 'far_cov_channels', 0)
+
         self.rt = RetrievalTool(
             seq_len=self.seq_len,
             pred_len=self.pred_len,
             channels=self.channels,
             n_period=self.n_period,
             topm=self.topm,
+            use_far=self.use_far,
+            use_covariates=use_covariates,
+            cov_channels=cov_channels,
+            far_config=far_config,
         )
         
         self.period_num = self.rt.period_num[-1 * self.n_period:]
@@ -48,30 +82,44 @@ class Model(nn.Module):
         self.retrieval_pred = nn.ModuleList(module_list)
         self.linear_pred = nn.Linear(2 * self.pred_len, self.pred_len)
 
+        # B4: confidence-aware retrieval gate, trained jointly with the head.
+        self.gate = RetrievalGate(learnable=True) if self.use_gating else None
+        self.topk_sims_dict = {}
+
 #         if self.task_name == 'classification':
 #             self.projection = nn.Linear(
 #                 configs.enc_in * configs.seq_len, configs.num_class)
 
     def prepare_dataset(self, train_data, valid_data, test_data):
         self.rt.prepare_dataset(train_data)
+
+        # Train FAR's future-aligned encoder + build the KB embedding index.
+        if self.use_far:
+            self.rt.train_far(self.device)
         
         self.retrieval_dict = {}
         
         print('Doing Train Retrieval')
-        train_rt = self.rt.retrieve_all(train_data, train=True, device=self.device)
+        train_rt, train_sims = self.rt.retrieve_all(train_data, train=True, device=self.device)
 
         print('Doing Valid Retrieval')
-        valid_rt = self.rt.retrieve_all(valid_data, train=False, device=self.device)
+        valid_rt, valid_sims = self.rt.retrieve_all(valid_data, train=False, device=self.device)
 
         print('Doing Test Retrieval')
-        test_rt = self.rt.retrieve_all(test_data, train=False, device=self.device)
+        test_rt, test_sims = self.rt.retrieve_all(test_data, train=False, device=self.device)
 
         del self.rt
-        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
             
         self.retrieval_dict['train'] = train_rt.detach()
         self.retrieval_dict['valid'] = valid_rt.detach()
         self.retrieval_dict['test'] = test_rt.detach()
+
+        if self.use_gating:
+            self.topk_sims_dict['train'] = train_sims
+            self.topk_sims_dict['valid'] = valid_sims
+            self.topk_sims_dict['test'] = test_sims
 
     def encoder(self, x, index, mode):
         index = index.to(self.device)
@@ -103,6 +151,13 @@ class Model(nn.Module):
 
         retrieval_pred_list = torch.stack(retrieval_pred_list, dim=1)
         retrieval_pred_list = retrieval_pred_list.sum(dim=1)
+
+        # B4: down-weight retrieval when no confidently future-aligned neighbor
+        # exists (novel regime), up-weight when retrieval is confident.
+        if self.use_gating and self.gate is not None:
+            topk_sims = self.topk_sims_dict[mode][index.cpu()].to(self.device)  # B, topm
+            gate_w = self.gate(topk_sims)  # B, 1
+            retrieval_pred_list = retrieval_pred_list * gate_w.unsqueeze(1)
         
         pred = torch.cat([x_pred_from_x, retrieval_pred_list], dim=1)
         pred = self.linear_pred(pred.permute(0, 2, 1)).permute(0, 2, 1).reshape(bsz, self.pred_len, self.channels)

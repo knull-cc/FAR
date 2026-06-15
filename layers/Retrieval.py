@@ -8,6 +8,8 @@ from tqdm import tqdm
 
 from torch.utils.data import Dataset, DataLoader
 
+from far.retriever import FARRetriever
+
 class RetrievalTool():
     def __init__(
         self,
@@ -19,6 +21,10 @@ class RetrievalTool():
         topm=20,
         with_dec=False,
         return_key=False,
+        use_far=False,
+        use_covariates=False,
+        cov_channels=0,
+        far_config=None,
     ):
         period_num = [16, 8, 4, 2, 1]
         period_num = period_num[-1 * n_period:]
@@ -35,10 +41,43 @@ class RetrievalTool():
         
         self.with_dec = with_dec
         self.return_key = return_key
+
+        # ---- FAR (Future-Aligned Retrieval) configuration --------------------
+        # When use_far is True, the past-similarity correlation key is replaced
+        # by FAR's future-aligned embedding similarity. Everything downstream
+        # (multi-grain future aggregation + fusion head) is left unchanged, so
+        # toggling use_far is a clean ablation: FAR vs past-retriever, same host.
+        self.use_far = use_far
+        self.use_covariates = use_covariates
+        self.cov_channels = cov_channels if use_covariates else 0
+        far_config = far_config or {}
+        self.far_config = far_config
+        self.x_mark_all = None
+        self.far = None
+        if self.use_far:
+            self.far = FARRetriever(
+                seq_len=seq_len,
+                pred_len=pred_len,
+                channels=channels,
+                cov_channels=self.cov_channels,
+                emb_dim=far_config.get('emb_dim', 128),
+                d_model=far_config.get('d_model', 128),
+                n_blocks=far_config.get('n_blocks', 3),
+                dropout=far_config.get('dropout', 0.1),
+                use_revin=far_config.get('use_revin', True),
+                temperature=far_config.get('temperature', 0.1),
+                pos_k=far_config.get('pos_k', 5),
+                future_metric=far_config.get('future_metric', 'shape'),
+                soft_dtw_gamma=far_config.get('soft_dtw_gamma', 0.1),
+                use_hard_neg=far_config.get('use_hard_neg', False),
+                hard_scale=far_config.get('hard_scale', 3.0),
+                use_gating=far_config.get('use_gating', False),
+            )
         
     def prepare_dataset(self, train_data):
         train_data_all = []
         y_data_all = []
+        x_mark_all = []
 
         for i in range(len(train_data)):
             td = train_data[i]
@@ -48,6 +87,9 @@ class RetrievalTool():
                 y_data_all.append(td[2][-(train_data.pred_len + train_data.label_len):])
             else:
                 y_data_all.append(td[2][-train_data.pred_len:])
+
+            if self.use_far and self.use_covariates:
+                x_mark_all.append(td[3])
             
         self.train_data_all = torch.tensor(np.stack(train_data_all, axis=0)).float()
         self.train_data_all_mg, _ = self.decompose_mg(self.train_data_all)
@@ -55,7 +97,64 @@ class RetrievalTool():
         self.y_data_all = torch.tensor(np.stack(y_data_all, axis=0)).float()
         self.y_data_all_mg, _ = self.decompose_mg(self.y_data_all)
 
+        if self.use_far and self.use_covariates:
+            self.x_mark_all = torch.tensor(np.stack(x_mark_all, axis=0)).float()
+            # The covariate (time-feature) channel count is only known once the
+            # data is loaded; rebuild the FAR encoder to match it. The encoder is
+            # trained separately and frozen, so rebuilding here is safe.
+            detected = self.x_mark_all.shape[-1]
+            if detected != self.cov_channels:
+                self.cov_channels = detected
+                self.far = FARRetriever(
+                    seq_len=self.seq_len,
+                    pred_len=self.pred_len,
+                    channels=self.channels,
+                    cov_channels=self.cov_channels,
+                    emb_dim=self.far_config.get('emb_dim', 128),
+                    d_model=self.far_config.get('d_model', 128),
+                    n_blocks=self.far_config.get('n_blocks', 3),
+                    dropout=self.far_config.get('dropout', 0.1),
+                    use_revin=self.far_config.get('use_revin', True),
+                    temperature=self.far_config.get('temperature', 0.1),
+                    pos_k=self.far_config.get('pos_k', 5),
+                    future_metric=self.far_config.get('future_metric', 'shape'),
+                    soft_dtw_gamma=self.far_config.get('soft_dtw_gamma', 0.1),
+                    use_hard_neg=self.far_config.get('use_hard_neg', False),
+                    hard_scale=self.far_config.get('hard_scale', 3.0),
+                    use_gating=self.far_config.get('use_gating', False),
+                )
+
         self.n_train = self.train_data_all.shape[0]
+
+    def train_far(self, device):
+        """Contrastively train the FAR encoder on the KB and build the index.
+
+        Positives/negatives are defined by FUTURE similarity; the encoder sees
+        only the PAST (+ covariates). Must be called after prepare_dataset and
+        before any retrieve / retrieve_all call.
+        """
+        assert self.use_far and self.far is not None
+        cfg = self.far_config
+        cov_all = self.x_mark_all if self.use_covariates else None
+
+        print('Training FAR future-aligned encoder')
+        self.far.fit(
+            past_all=self.train_data_all,
+            future_all=self.y_data_all,
+            cov_all=cov_all,
+            device=device,
+            epochs=cfg.get('epochs', 10),
+            batch_size=cfg.get('batch_size', 256),
+            lr=cfg.get('lr', 1e-3),
+            verbose=True,
+        )
+        print('Encoding FAR knowledge base')
+        self.far.encode_kb(
+            past_all=self.train_data_all,
+            cov_all=cov_all,
+            device=device,
+            batch_size=cfg.get('encode_batch_size', 1024),
+        )
 
     def decompose_mg(self, data_all, remove_offset=True):
         data_all = copy.deepcopy(data_all) # T, S, C
@@ -106,18 +205,26 @@ class RetrievalTool():
         
         return sim
         
-    def retrieve(self, x, index, train=True):
+    def retrieve(self, x, index, train=True, x_mark=None):
         index = index.to(x.device)
         
         bsz, seq_len, channels = x.shape
         assert(seq_len == self.seq_len, channels == self.channels)
-        
-        x_mg, mg_offset = self.decompose_mg(x) # G, B, S, C
 
-        sim = self.periodic_batch_corr(
-            self.train_data_all_mg.flatten(start_dim=2), # G, T, S * C
-            x_mg.flatten(start_dim=2), # G, B, S * C
-        ) # G, B, T
+        if self.use_far:
+            # FAR: future-aligned embedding similarity (replaces past-corr key).
+            cov = x_mark if (self.use_covariates and x_mark is not None) else None
+            sim_single = self.far.query_similarity(x, cov, device=x.device)  # B, T
+            # Broadcast the single future-aligned ranking across grains so the
+            # downstream multi-grain future aggregation is unchanged.
+            sim = sim_single.unsqueeze(0).repeat(self.n_period, 1, 1)  # G, B, T
+        else:
+            x_mg, mg_offset = self.decompose_mg(x) # G, B, S, C
+
+            sim = self.periodic_batch_corr(
+                self.train_data_all_mg.flatten(start_dim=2), # G, T, S * C
+                x_mg.flatten(start_dim=2), # G, B, S * C
+            ) # G, B, T
             
         if train:
             sliding_index = torch.arange(2 * (self.seq_len + self.pred_len) - 1).to(x.device)
@@ -135,7 +242,8 @@ class RetrievalTool():
 
         sim = sim.reshape(self.n_period * bsz, self.n_train) # G X B, T
                 
-        topm_index = torch.topk(sim, self.topm, dim=1).indices
+        topm = torch.topk(sim, self.topm, dim=1)
+        topm_index = topm.indices
         ranking_sim = torch.ones_like(sim) * float('-inf')
         
         rows = torch.arange(sim.size(0)).unsqueeze(-1).to(sim.device)
@@ -153,8 +261,15 @@ class RetrievalTool():
         
         pred_from_retrieval = torch.bmm(ranking_prob, y_data_all).reshape(self.n_period, bsz, -1, channels)
         pred_from_retrieval = pred_from_retrieval.to(x.device)
-        
-        return pred_from_retrieval
+
+        # B4 gating: expose the top-k retrieval similarities (confidence) of the
+        # future-aligned ranking so the host can learn a confidence-aware gate.
+        topk_sims = None
+        if self.use_far and self.far_config.get('use_gating', False):
+            topk_vals = topm.values.reshape(self.n_period, bsz, self.topm)
+            topk_sims = topk_vals[0].detach().cpu()  # B, topm (grains share ranking)
+
+        return pred_from_retrieval, topk_sims
     
     def retrieve_all(self, data, train=False, device=torch.device('cpu')):
         assert(self.train_data_all_mg != None)
@@ -168,12 +283,22 @@ class RetrievalTool():
         )
         
         retrievals = []
+        topk_sims_all = []
         with torch.no_grad():
             for index, batch_x, batch_y, batch_x_mark, batch_y_mark in tqdm(rt_loader):
-                pred_from_retrieval = self.retrieve(batch_x.float().to(device), index, train=train)
+                pred_from_retrieval, topk_sims = self.retrieve(
+                    batch_x.float().to(device), index, train=train,
+                    x_mark=batch_x_mark.float().to(device),
+                )
                 pred_from_retrieval = pred_from_retrieval.cpu()
                 retrievals.append(pred_from_retrieval)
+                if topk_sims is not None:
+                    topk_sims_all.append(topk_sims)
                 
         retrievals = torch.cat(retrievals, dim=1)
-        
-        return retrievals
+
+        if len(topk_sims_all) > 0:
+            topk_sims_all = torch.cat(topk_sims_all, dim=0)  # n_samples, topm
+            return retrievals, topk_sims_all
+
+        return retrievals, None
