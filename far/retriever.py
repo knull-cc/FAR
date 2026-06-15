@@ -1,16 +1,22 @@
-"""FAR retriever: train the encoder, index the KB, and do Top-K lookup.
+"""FAR retriever: train the encoder(s), index the KB, and do Top-K lookup.
 
 This is the object that a host pipeline plugs in to replace its
 cosine/euclidean past-similarity key. It exposes:
 
-    fit(...)          -> contrastively train the future-aligned encoder
+    fit(...)          -> contrastively train the future-aligned encoder(s)
     encode_kb(...)    -> build the embedding index over the knowledge base
-    query_similarity  -> (B, T) similarity of queries to every KB entry
+    query_similarity  -> (G, B, T) similarity of queries to every KB entry
 
-The actual fusion of retrieved futures is left to the host (FAR is a plug-in
-retriever, not a backbone). In RAFT, `layers/Retrieval.py` consumes the
-similarity matrix produced here and reuses RAFT's multi-grain future
-aggregation + linear fusion head unchanged.
+Per-grain retrieval
+-------------------
+The host (RAFT) decomposes every window into ``n_grains`` multi-grain views
+(progressively smoothed copies of the series). The baseline correlation key is
+computed *per grain*, so each grain retrieves its own neighbors and the
+downstream multi-grain aggregation is genuinely diverse. FAR mirrors this: it
+holds one future-aligned encoder per grain and produces a separate
+future-aligned ranking for every grain, where "future" is that grain's
+(smoothed) future window. Everything downstream (multi-grain future
+aggregation + linear fusion head) is left unchanged.
 """
 
 import math
@@ -32,7 +38,8 @@ class FARRetriever:
                  emb_dim=128, d_model=128, n_blocks=3, dropout=0.1,
                  use_revin=True, temperature=0.1, pos_k=5,
                  future_metric="shape", soft_dtw_gamma=0.1,
-                 use_hard_neg=False, hard_scale=3.0, use_gating=False):
+                 use_hard_neg=False, hard_scale=3.0, use_gating=False,
+                 n_grains=1):
         self.seq_len = seq_len
         self.pred_len = pred_len
         self.channels = channels
@@ -45,50 +52,67 @@ class FARRetriever:
         self.use_hard_neg = use_hard_neg
         self.hard_scale = hard_scale
         self.use_gating = use_gating
+        self.n_grains = n_grains
 
-        self.encoder = FAREncoder(
-            seq_len=seq_len,
-            in_channels=channels,
-            cov_channels=cov_channels,
-            d_model=d_model,
-            emb_dim=emb_dim,
-            n_blocks=n_blocks,
-            dropout=dropout,
-            use_revin=use_revin,
-        )
+        # One future-aligned encoder per grain (mirrors RAFT's per-grain key).
+        self.encoders = [
+            FAREncoder(
+                seq_len=seq_len,
+                in_channels=channels,
+                cov_channels=cov_channels,
+                d_model=d_model,
+                emb_dim=emb_dim,
+                n_blocks=n_blocks,
+                dropout=dropout,
+                use_revin=use_revin,
+            )
+            for _ in range(n_grains)
+        ]
         self.gate = RetrievalGate(learnable=True) if use_gating else None
 
-        self.kb_emb = None  # (T, emb_dim)
+        self.kb_emb = [None] * n_grains  # list of (T, emb_dim) per grain
 
     def to(self, device):
-        self.encoder = self.encoder.to(device)
+        self.encoders = [enc.to(device) for enc in self.encoders]
         if self.gate is not None:
             self.gate = self.gate.to(device)
         return self
 
     def parameters(self):
-        params = list(self.encoder.parameters())
+        params = []
+        for enc in self.encoders:
+            params += list(enc.parameters())
         if self.gate is not None:
             params += list(self.gate.parameters())
         return params
 
-    # ------------------------------------------------------------------ train
-    def fit(self, past_all, future_all, cov_all=None, device=torch.device("cpu"),
-            epochs=10, batch_size=256, lr=1e-3, verbose=True):
-        """Contrastively train the future-aligned encoder.
+    def _train_mode(self):
+        for enc in self.encoders:
+            enc.train()
 
-        Positives/negatives are defined by FUTURE similarity; the encoder only
-        ever sees the PAST (+ covariates). No future leakage at inference.
+    def _eval_mode(self):
+        for enc in self.encoders:
+            enc.eval()
+
+    # ------------------------------------------------------------------ train
+    def fit(self, past_all_mg, future_all_mg, cov_all=None,
+            device=torch.device("cpu"), epochs=10, batch_size=256, lr=1e-3,
+            verbose=True):
+        """Contrastively train one future-aligned encoder per grain.
+
+        Positives/negatives are defined by FUTURE similarity (at each grain);
+        the encoder only ever sees the PAST (+ covariates). No future leakage
+        at inference.
 
         Args:
-            past_all: (T, seq_len, C) KB past windows.
-            future_all: (T, pred_len, C) KB future windows.
-            cov_all: (T, seq_len, cov_channels) or None.
+            past_all_mg: (G, T, seq_len, C) per-grain KB past windows.
+            future_all_mg: (G, T, pred_len, C) per-grain KB future windows.
+            cov_all: (T, seq_len, cov_channels) or None (shared across grains).
         """
         self.to(device)
-        self.encoder.train()
+        self._train_mode()
 
-        n = past_all.shape[0]
+        n = past_all_mg.shape[1]
         idx_ds = TensorDataset(torch.arange(n))
         loader = DataLoader(idx_ds, batch_size=batch_size, shuffle=True,
                             drop_last=True)
@@ -99,33 +123,38 @@ class FARRetriever:
             it = tqdm(loader, disable=not verbose,
                       desc=f"FAR encoder epoch {epoch + 1}/{epochs}")
             for (batch_idx,) in it:
-                past = past_all[batch_idx].to(device)
-                future = future_all[batch_idx].to(device)
                 cov = None
                 if cov_all is not None and self.cov_channels > 0:
                     cov = cov_all[batch_idx].to(device)
 
-                emb = self.encoder(past, cov)
+                total_loss = 0.0
+                for g in range(self.n_grains):
+                    past = past_all_mg[g, batch_idx].to(device)
+                    future = future_all_mg[g, batch_idx].to(device)
 
-                pos_mask, neg_mask = build_pos_neg(
-                    future, metric=self.future_metric, pos_k=self.pos_k,
-                    gamma=self.soft_dtw_gamma,
-                )
+                    emb = self.encoders[g](past, cov)
 
-                neg_weights = None
-                if self.use_hard_neg:
-                    neg_weights = hard_negative_weights(
-                        past, future, neg_mask,
-                        metric=self.future_metric,
-                        hard_scale=self.hard_scale,
+                    pos_mask, neg_mask = build_pos_neg(
+                        future, metric=self.future_metric, pos_k=self.pos_k,
                         gamma=self.soft_dtw_gamma,
                     )
 
-                loss = info_nce_loss(
-                    emb, pos_mask, neg_mask,
-                    temperature=self.temperature,
-                    neg_weights=neg_weights,
-                )
+                    neg_weights = None
+                    if self.use_hard_neg:
+                        neg_weights = hard_negative_weights(
+                            past, future, neg_mask,
+                            metric=self.future_metric,
+                            hard_scale=self.hard_scale,
+                            gamma=self.soft_dtw_gamma,
+                        )
+
+                    total_loss = total_loss + info_nce_loss(
+                        emb, pos_mask, neg_mask,
+                        temperature=self.temperature,
+                        neg_weights=neg_weights,
+                    )
+
+                loss = total_loss / self.n_grains
 
                 optim.zero_grad()
                 loss.backward()
@@ -134,45 +163,53 @@ class FARRetriever:
                 if verbose:
                     it.set_postfix(loss=sum(losses) / len(losses))
 
-        self.encoder.eval()
+        self._eval_mode()
         return self
 
     # ------------------------------------------------------------------ index
     @torch.no_grad()
-    def encode_kb(self, past_all, cov_all=None, device=torch.device("cpu"),
+    def encode_kb(self, past_all_mg, cov_all=None, device=torch.device("cpu"),
                   batch_size=1024):
-        """Build the embedding index over the knowledge base."""
+        """Build a per-grain embedding index over the knowledge base.
+
+        Args:
+            past_all_mg: (G, T, seq_len, C) per-grain KB past windows.
+            cov_all: (T, seq_len, cov_channels) or None.
+        """
         self.to(device)
-        self.encoder.eval()
-        embs = []
-        n = past_all.shape[0]
-        for i in range(math.ceil(n / batch_size)):
-            sl = slice(i * batch_size, (i + 1) * batch_size)
-            past = past_all[sl].to(device)
-            cov = None
-            if cov_all is not None and self.cov_channels > 0:
-                cov = cov_all[sl].to(device)
-            embs.append(self.encoder(past, cov).cpu())
-        self.kb_emb = torch.cat(embs, dim=0)  # (T, d)
+        self._eval_mode()
+        n = past_all_mg.shape[1]
+        for g in range(self.n_grains):
+            embs = []
+            for i in range(math.ceil(n / batch_size)):
+                sl = slice(i * batch_size, (i + 1) * batch_size)
+                past = past_all_mg[g, sl].to(device)
+                cov = None
+                if cov_all is not None and self.cov_channels > 0:
+                    cov = cov_all[sl].to(device)
+                embs.append(self.encoders[g](past, cov).cpu())
+            self.kb_emb[g] = torch.cat(embs, dim=0)  # (T, d)
         return self.kb_emb
 
     # ------------------------------------------------------------------ query
     @torch.no_grad()
-    def query_embeddings(self, past, cov=None):
-        self.encoder.eval()
-        return self.encoder(past, cov)
-
-    def query_similarity(self, past, cov=None, device=None):
-        """Cosine similarity between query past windows and every KB entry.
+    def query_similarity(self, past_mg, cov=None, device=None):
+        """Per-grain cosine similarity between query and every KB entry.
 
         Args:
-            past: (B, seq_len, C) query past windows.
-            cov: (B, seq_len, cov_channels) or None.
+            past_mg: (G, B, seq_len, C) per-grain query past windows.
+            cov: (B, seq_len, cov_channels) or None (shared across grains).
         Returns:
-            (B, T) similarity matrix in [-1, 1].
+            (G, B, T) similarity in [-1, 1].
         """
         if device is None:
-            device = past.device
-        q = self.query_embeddings(past.to(device), None if cov is None else cov.to(device))
-        kb = self.kb_emb.to(device)
-        return F.normalize(q, dim=1) @ F.normalize(kb, dim=1).t()
+            device = past_mg.device
+        self._eval_mode()
+        cov_d = None if cov is None else cov.to(device)
+
+        sims = []
+        for g in range(self.n_grains):
+            q = self.encoders[g](past_mg[g].to(device), cov_d)
+            kb = self.kb_emb[g].to(device)
+            sims.append(F.normalize(q, dim=1) @ F.normalize(kb, dim=1).t())
+        return torch.stack(sims, dim=0)  # (G, B, T)

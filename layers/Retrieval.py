@@ -74,6 +74,7 @@ class RetrievalTool():
                 use_hard_neg=far_config.get('use_hard_neg', False),
                 hard_scale=far_config.get('hard_scale', 3.0),
                 use_gating=far_config.get('use_gating', False),
+                n_grains=self.n_period,
             )
         
     def prepare_dataset(self, train_data):
@@ -124,6 +125,7 @@ class RetrievalTool():
                     use_hard_neg=self.far_config.get('use_hard_neg', False),
                     hard_scale=self.far_config.get('hard_scale', 3.0),
                     use_gating=self.far_config.get('use_gating', False),
+                    n_grains=self.n_period,
                 )
 
         self.n_train = self.train_data_all.shape[0]
@@ -139,10 +141,10 @@ class RetrievalTool():
         cfg = self.far_config
         cov_all = self.x_mark_all if self.use_covariates else None
 
-        print('Training FAR future-aligned encoder')
+        print('Training FAR future-aligned encoder (per grain)')
         self.far.fit(
-            past_all=self.train_data_all,
-            future_all=self.y_data_all,
+            past_all_mg=self.train_data_all_mg,
+            future_all_mg=self.y_data_all_mg,
             cov_all=cov_all,
             device=device,
             epochs=cfg.get('epochs', 10),
@@ -150,9 +152,9 @@ class RetrievalTool():
             lr=cfg.get('lr', 1e-3),
             verbose=True,
         )
-        print('Encoding FAR knowledge base')
+        print('Encoding FAR knowledge base (per grain)')
         self.far.encode_kb(
-            past_all=self.train_data_all,
+            past_all_mg=self.train_data_all_mg,
             cov_all=cov_all,
             device=device,
             batch_size=cfg.get('encode_batch_size', 1024),
@@ -215,11 +217,12 @@ class RetrievalTool():
 
         if self.use_far:
             # FAR: future-aligned embedding similarity (replaces past-corr key).
+            # Decompose the query into the same multi-grain views the KB index
+            # was built on, then retrieve a separate future-aligned ranking per
+            # grain (mirrors RAFT's per-grain correlation key).
+            x_mg, _ = self.decompose_mg(x)  # G, B, S, C
             cov = x_mark if (self.use_covariates and x_mark is not None) else None
-            sim_single = self.far.query_similarity(x, cov, device=x.device)  # B, T
-            # Broadcast the single future-aligned ranking across grains so the
-            # downstream multi-grain future aggregation is unchanged.
-            sim = sim_single.unsqueeze(0).repeat(self.n_period, 1, 1)  # G, B, T
+            sim = self.far.query_similarity(x_mg, cov, device=x.device)  # G, B, T
         else:
             x_mg, mg_offset = self.decompose_mg(x) # G, B, S, C
 
