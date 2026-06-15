@@ -53,6 +53,7 @@ class Model(nn.Module):
             'soft_dtw_gamma': getattr(configs, 'far_soft_dtw_gamma', 0.1),
             'use_hard_neg': getattr(configs, 'far_use_hard_neg', False),
             'hard_scale': getattr(configs, 'far_hard_scale', 3.0),
+            'aux_weight': getattr(configs, 'far_aux_weight', 1.0),
             'use_gating': self.use_gating,
             'epochs': getattr(configs, 'far_epochs', 10),
             'batch_size': getattr(configs, 'far_batch_size', 256),

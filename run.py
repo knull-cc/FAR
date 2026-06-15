@@ -102,6 +102,10 @@ if __name__ == '__main__':
                              'correlation, so this is ~half the corr-key temperature)')
     parser.add_argument('--far_pos_k', type=int, default=5,
                         help='A1: #future-nearest neighbors treated as positives')
+    parser.add_argument('--far_aux_weight', type=float, default=1.0,
+                        help='weight of the auxiliary future-trend regression loss '
+                             '(train-only; distills future-trend info into the past '
+                             'embedding; 0 disables)')
     parser.add_argument('--far_future_metric', type=str, default='shape',
                         help='A1: future-similarity metric [shape|euclid|corr|softdtw|slope]')
     parser.add_argument('--far_soft_dtw_gamma', type=float, default=0.1, help='soft-DTW smoothing')

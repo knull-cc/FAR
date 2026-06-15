@@ -80,6 +80,7 @@ class RetrievalTool():
                 hard_scale=far_config.get('hard_scale', 3.0),
                 use_gating=far_config.get('use_gating', False),
                 n_grains=self.n_period,
+                aux_weight=far_config.get('aux_weight', 1.0),
             )
         
     def prepare_dataset(self, train_data):
@@ -131,6 +132,7 @@ class RetrievalTool():
                     hard_scale=self.far_config.get('hard_scale', 3.0),
                     use_gating=self.far_config.get('use_gating', False),
                     n_grains=self.n_period,
+                    aux_weight=self.far_config.get('aux_weight', 1.0),
                 )
 
         self.n_train = self.train_data_all.shape[0]
