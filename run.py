@@ -7,6 +7,13 @@ import random
 import numpy as np
 
 if __name__ == '__main__':
+    fix_seed = 0
+    random.seed(fix_seed)
+    np.random.seed(fix_seed)
+    torch.manual_seed(fix_seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
     parser = argparse.ArgumentParser(description='TimesNet')
 
     # basic config
@@ -14,8 +21,8 @@ if __name__ == '__main__':
                         help='task name, we currently support only long_term_forecast, options:[long_term_forecast]')
     parser.add_argument('--is_training', type=int, default=1, help='status')
     parser.add_argument('--model_id', type=str, default='temp', help='model id')
-    parser.add_argument('--model', type=str, default='FAR',
-                        help='model name, options: [FAR]')
+    parser.add_argument('--model', type=str, default='RAFT',
+                        help='model name, options: [RAFT]')
 
     # data loader
     parser.add_argument('--data', type=str, required=True, default='ETTh1', help='dataset type')
@@ -87,51 +94,8 @@ if __name__ == '__main__':
         help='Number of Retrievals'
     )
 
-    # FAR: Future-Aligned Retrieval (plug-in retriever; replaces past-similarity)
-    parser.add_argument('--use_far', action='store_true', default=False,
-                        help='use FAR future-aligned retrieval instead of past-corr')
-    parser.add_argument('--far_emb_dim', type=int, default=128, help='FAR embedding dim')
-    parser.add_argument('--far_d_model', type=int, default=128, help='FAR encoder width')
-    parser.add_argument('--far_n_blocks', type=int, default=3, help='FAR encoder conv blocks')
-    parser.add_argument('--far_dropout', type=float, default=0.1, help='FAR encoder dropout')
-    parser.add_argument('--far_use_revin', type=int, default=1, help='A3: RevIN in FAR encoder')
-    parser.add_argument('--far_temperature', type=float, default=0.1, help='InfoNCE temperature')
-    parser.add_argument('--far_fuse_temperature', type=float, default=0.1,
-                        help='softmax temperature for the FAR retrieval-fusion weights. '
-                             'Defaults to 0.1 (identical to the RAFT correlation key) so '
-                             "FAR's only delta over RAFT is the future-aligned retrieval "
-                             'key; lower it only if you want to study fusion sharpness.')
-    parser.add_argument('--far_pos_k', type=int, default=5,
-                        help='A1: #future-nearest neighbors treated as positives')
-    parser.add_argument('--far_aux_weight', type=float, default=1.0,
-                        help='weight of the auxiliary future-trend regression loss '
-                             '(train-only; distills future-trend info into the past '
-                             'embedding; 0 disables)')
-    parser.add_argument('--far_blend_alpha', type=float, default=0.3,
-                        help='blend weight of the future-aligned similarity on top of '
-                             "RAFT's correlation key: sim=(1-a)*corr+a*far. 0 == exactly "
-                             'RAFT (FAR is additive, so it can only help); try 0.1-0.5')
-    parser.add_argument('--far_future_metric', type=str, default='shape',
-                        help='A1: future-similarity metric [shape|euclid|corr|softdtw|slope]')
-    parser.add_argument('--far_soft_dtw_gamma', type=float, default=0.1, help='soft-DTW smoothing')
-    parser.add_argument('--far_use_hard_neg', action='store_true', default=False,
-                        help='B5: hard-negative mining (past-similar, future-divergent)')
-    parser.add_argument('--far_hard_scale', type=float, default=3.0, help='B5: hard-negative up-weight scale')
-    parser.add_argument('--far_use_gating', action='store_true', default=False,
-                        help='B4: confidence-aware retrieval gating')
-    parser.add_argument('--far_use_covariates', action='store_true', default=False,
-                        help='A2: feed time-feature covariates to the FAR encoder')
-    parser.add_argument('--far_cov_channels', type=int, default=0,
-                        help='A2: #covariate channels (auto-detected from data if covariates on)')
-    parser.add_argument('--far_epochs', type=int, default=10, help='FAR encoder pretraining epochs')
-    parser.add_argument('--far_batch_size', type=int, default=256, help='FAR encoder batch size')
-    parser.add_argument('--far_lr', type=float, default=1e-3, help='FAR encoder learning rate')
-
     # optimization
-    parser.add_argument('--random_seed', type=int, default=0, help='random seed')
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
-    parser.add_argument('--retrieval_num_workers', type=int, default=0,
-                        help='data loader num workers for precomputing retrieval cache')
     parser.add_argument('--itr', type=int, default=1, help='experiments times')
     parser.add_argument('--train_epochs', type=int, default=10, help='train epochs')
     parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
@@ -178,15 +142,6 @@ if __name__ == '__main__':
     parser.add_argument('--extra_tag', type=str, default="", help="Anything extra")
 
     args = parser.parse_args()
-
-    # reproducibility (scripts pass --random_seed)
-    fix_seed = args.random_seed
-    random.seed(fix_seed)
-    np.random.seed(fix_seed)
-    torch.manual_seed(fix_seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
     # args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
     args.use_gpu = True if torch.cuda.is_available() else False
 

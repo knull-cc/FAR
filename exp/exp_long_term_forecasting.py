@@ -23,19 +23,16 @@ class Exp_Long_Term_Forecast(Exp_Basic):
     def _build_model(self):
         model = self.model_dict[self.args.model].Model(self.args).float()
 
+        if self.args.use_multi_gpu and self.args.use_gpu:
+            model = nn.DataParallel(model, device_ids=self.args.device_ids)
+            
         train_data, train_loader = self._get_data(flag='train')
         vali_data, vali_loader = self._get_data(flag='val')
         test_data, test_loader = self._get_data(flag='test')
         
         model.prepare_dataset(train_data, vali_data, test_data)
-
-        if self.args.use_multi_gpu and self.args.use_gpu:
-            model = nn.DataParallel(model, device_ids=self.args.device_ids)
         
         return model
-
-    def _unwrap_model(self, model):
-        return model.module if isinstance(model, nn.DataParallel) else model
 
     def _get_data(self, flag):
         data_set, data_loader = data_provider(self.args, flag)
@@ -49,7 +46,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
         criterion = nn.MSELoss()
         return criterion
 
-    def vali(self, vali_data, vali_loader, criterion, mode='valid'):
+    def vali(self, vali_data, vali_loader, criterion):
         total_loss = []
         self.model.eval()
         with torch.no_grad():
@@ -64,8 +61,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'FAR':
-                    outputs = self.model(batch_x, index, mode=mode)
+                if self.args.model == 'RAFT':
+                    outputs = self.model(batch_x, index, mode='valid')
                 else:
                     if self.args.use_amp:
                         with torch.cuda.amp.autocast():
@@ -108,7 +105,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             scaler = torch.cuda.amp.GradScaler()
 
         best_valid_loss = float('inf')
-        best_model_state = None
+        best_model = None
             
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -129,7 +126,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
 
                 # encoder - decoder
-                if self.args.model == 'FAR':
+                if self.args.model == 'RAFT':
                     outputs = self.model(batch_x, index, mode='train')
                 else:
                     if self.args.use_amp:
@@ -162,8 +159,8 @@ class Exp_Long_Term_Forecast(Exp_Basic):
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             train_loss = np.average(train_loss)
-            vali_loss = self.vali(vali_data, vali_loader, criterion, mode='valid')
-            test_loss = self.vali(test_data, test_loader, criterion, mode='test')
+            vali_loss = self.vali(vali_data, vali_loader, criterion)
+            test_loss = self.vali(test_data, test_loader, criterion)
 
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
                 epoch + 1, train_steps, train_loss, vali_loss, test_loss))
@@ -172,28 +169,21 @@ class Exp_Long_Term_Forecast(Exp_Basic):
             # We do not use early stopping
             
             if vali_loss < best_valid_loss:
-                best_model_state = copy.deepcopy(self._unwrap_model(self.model).state_dict())
+                best_model = copy.deepcopy(self.model)
                 best_valid_loss = vali_loss
                 
-        if best_model_state is None:
-            best_model_state = copy.deepcopy(self._unwrap_model(self.model).state_dict())
-
         best_model_path = path + '/' + 'checkpoint.pth'
-        torch.save(best_model_state, best_model_path)
-        self._unwrap_model(self.model).load_state_dict(best_model_state)
+        torch.save(best_model.state_dict(), best_model_path)
+#         self.model.load_state_dict(torch.load(best_model_path))
 
-        return self.model
+#         return self.model
+        return best_model
 
     def test(self, setting, test=0):
         test_data, test_loader = self._get_data(flag='test')
         if test:
             print('loading model')
-            self._unwrap_model(self.model).load_state_dict(
-                torch.load(
-                    os.path.join('./checkpoints/' + setting, 'checkpoint.pth'),
-                    map_location=self.device,
-                )
-            )
+            self.model.load_state_dict(torch.load(os.path.join('./checkpoints/' + setting, 'checkpoint.pth')))
 
         preds = []
         trues = []
@@ -214,7 +204,7 @@ class Exp_Long_Term_Forecast(Exp_Basic):
                 dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
                 dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
                 # encoder - decoder
-                if self.args.model == 'FAR':
+                if self.args.model == 'RAFT':
                     outputs = self.model(batch_x, index, mode='test')
                 else:
                     if self.args.use_amp:

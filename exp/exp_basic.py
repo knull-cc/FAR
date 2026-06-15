@@ -1,13 +1,13 @@
 import os
 import torch
-from models import FAR
+from models import RAFT
 
 
 class Exp_Basic(object):
     def __init__(self, args):
         self.args = args
         self.model_dict = {
-            'FAR': FAR,
+            'RAFT': RAFT,
         }
 
         self.device = self._acquire_device()
