@@ -54,11 +54,11 @@ class RetrievalTool():
         self.cov_channels = cov_channels if use_covariates else 0
         far_config = far_config or {}
         self.far_config = far_config
-        # FAR's cosine key is compressed into a high, narrow band, so its
-        # top1-vs-topm gap is ~half of the correlation key's. A smaller fusion
-        # temperature restores comparable softmax sharpness (else the fusion
-        # degenerates toward averaging the top-m futures -> over-smoothing).
-        self.far_fuse_temperature = far_config.get('fuse_temperature', 0.05)
+        # Fusion-softmax temperature for the FAR path. Defaults to the same
+        # value as the RAFT correlation key (0.1) so FAR's only delta over RAFT
+        # is the future-aligned retrieval key, not the fusion. Exposed as a
+        # knob purely for studying fusion sharpness.
+        self.far_fuse_temperature = far_config.get('fuse_temperature', 0.1)
         self.x_mark_all = None
         self.far = None
         if self.use_far:
@@ -266,9 +266,9 @@ class RetrievalTool():
 
         data_len, seq_len, channels = self.train_data_all.shape
 
-        # FAR's compressed cosine sims need a sharper (smaller) fusion
-        # temperature to match the correlation key's weight concentration;
-        # RAFT's path keeps its original temperature.
+        # By default FAR uses the same fusion temperature as the RAFT
+        # correlation key (far_fuse_temperature defaults to self.temperature),
+        # so the only delta over RAFT is the future-aligned retrieval key.
         fuse_temperature = self.far_fuse_temperature if self.use_far else self.temperature
         ranking_prob = F.softmax(ranking_sim / fuse_temperature, dim=2)
         ranking_prob = ranking_prob.detach().cpu() # G, B, T

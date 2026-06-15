@@ -47,7 +47,7 @@ class Model(nn.Module):
             'dropout': getattr(configs, 'far_dropout', 0.1),
             'use_revin': bool(getattr(configs, 'far_use_revin', 1)),
             'temperature': getattr(configs, 'far_temperature', 0.1),
-            'fuse_temperature': getattr(configs, 'far_fuse_temperature', 0.05),
+            'fuse_temperature': getattr(configs, 'far_fuse_temperature', 0.1),
             'pos_k': getattr(configs, 'far_pos_k', 5),
             'future_metric': getattr(configs, 'far_future_metric', 'shape'),
             'soft_dtw_gamma': getattr(configs, 'far_soft_dtw_gamma', 0.1),
