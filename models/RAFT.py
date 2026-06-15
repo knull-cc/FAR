@@ -30,7 +30,15 @@ class Model(nn.Module):
         
         self.n_period = configs.n_period
         self.topm = configs.topm
-        
+
+        # FAR (Future-Aligned Retrieval) options. Default off -> vanilla RAFT.
+        self.use_far = getattr(configs, 'use_far', False)
+        self.far_alpha = getattr(configs, 'far_alpha', 0.0)
+        self.far_dim = getattr(configs, 'far_dim', 64)
+        self.far_epochs = getattr(configs, 'far_epochs', 10)
+        self.far_lr = getattr(configs, 'far_lr', 1e-3)
+        self.future_encoder = None
+
         self.rt = RetrievalTool(
             seq_len=self.seq_len,
             pred_len=self.pred_len,
@@ -54,7 +62,28 @@ class Model(nn.Module):
 
     def prepare_dataset(self, train_data, valid_data, test_data):
         self.rt.prepare_dataset(train_data)
-        
+
+        # FAR: offline-train the future-trend encoder and attach it to the
+        # retriever so far_sim is blended into the ranking. Inference keeps
+        # only the encoder (the regression head is internal and unused at
+        # retrieval time). With use_far=False this whole block is skipped and
+        # the behaviour is identical to vanilla RAFT.
+        if self.use_far and self.far_alpha > 0:
+            from far.future_encoder import FutureTrendEncoder, train_future_encoder
+            print('[FAR] Offline-training future-trend encoder '
+                  '(alpha={}, dim={}, epochs={})'.format(
+                      self.far_alpha, self.far_dim, self.far_epochs))
+            self.future_encoder = FutureTrendEncoder(
+                seq_len=self.seq_len,
+                pred_len=self.pred_len,
+                emb_dim=self.far_dim,
+            ).to(self.device)
+            train_future_encoder(
+                self.future_encoder, train_data, self.device,
+                epochs=self.far_epochs, lr=self.far_lr,
+            )
+            self.rt.set_future_encoder(self.future_encoder, self.far_alpha, self.device)
+
         self.retrieval_dict = {}
         
         print('Doing Train Retrieval')
@@ -84,6 +113,8 @@ class Model(nn.Module):
 
         x_pred_from_x = self.linear_x(x_norm.permute(0, 2, 1)).permute(0, 2, 1) # B, P, C
         
+
+        index = index.to(self.retrieval_dict[mode].device)
         pred_from_retrieval = self.retrieval_dict[mode][:, index] # G, B, P, C
         pred_from_retrieval = pred_from_retrieval.to(self.device)
         

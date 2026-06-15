@@ -35,7 +35,32 @@ class RetrievalTool():
         
         self.with_dec = with_dec
         self.return_key = return_key
-        
+
+        # FAR (Future-Aligned Retrieval) add-on. Disabled by default so that
+        # far_alpha == 0 reproduces vanilla RAFT exactly.
+        self.future_encoder = None
+        self.far_alpha = 0.0
+        self.kb_emb = None
+
+    def set_future_encoder(self, future_encoder, far_alpha, device):
+        """Attach a trained future-trend encoder and precompute KB embeddings.
+
+        KB embeddings are the (normalized) encoder embeddings of every past
+        window in the retrieval database, used to compute the cosine `far_sim`.
+        """
+        self.future_encoder = future_encoder
+        self.far_alpha = far_alpha
+
+        self.future_encoder.eval()
+        embs = []
+        in_bsz = 1024
+        with torch.no_grad():
+            for i in range(0, self.train_data_all.shape[0], in_bsz):
+                chunk = self.train_data_all[i:i + in_bsz].to(device)  # b, S, C
+                emb = self.future_encoder.embed(chunk)                # b, D
+                embs.append(F.normalize(emb, dim=-1).cpu())
+        self.kb_emb = torch.cat(embs, dim=0)  # T, D (normalized)
+
     def prepare_dataset(self, train_data):
         train_data_all = []
         y_data_all = []
@@ -118,7 +143,17 @@ class RetrievalTool():
             self.train_data_all_mg.flatten(start_dim=2), # G, T, S * C
             x_mg.flatten(start_dim=2), # G, B, S * C
         ) # G, B, T
-            
+
+        # FAR: blend (not replace) future-aligned cosine similarity into the
+        # RAFT correlation. far_alpha == 0 -> identical to RAFT.
+        if self.far_alpha > 0 and self.future_encoder is not None:
+            with torch.no_grad():
+                q_emb = self.future_encoder.embed(x)        # B, D
+                q_emb = F.normalize(q_emb, dim=-1)
+            far_sim = torch.matmul(q_emb, self.kb_emb.to(x.device).t())  # B, T
+            far_sim = far_sim.unsqueeze(0)                  # 1, B, T (broadcast over G)
+            sim = (1.0 - self.far_alpha) * sim + self.far_alpha * far_sim
+
         if train:
             sliding_index = torch.arange(2 * (self.seq_len + self.pred_len) - 1).to(x.device)
             sliding_index = sliding_index.unsqueeze(dim=0).repeat(len(index), 1)

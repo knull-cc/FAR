@@ -25,7 +25,7 @@ if __name__ == '__main__':
                         help='model name, options: [RAFT]')
 
     # data loader
-    parser.add_argument('--data', type=str, required=True, default='ETTh1', help='dataset type')
+    parser.add_argument('--data', type=str, default='ETTh1', help='dataset type')
     parser.add_argument('--root_path', type=str, default='./data/ETT/', help='root path of the data file')
     parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
     parser.add_argument('--features', type=str, default='M',
@@ -94,6 +94,20 @@ if __name__ == '__main__':
         help='Number of Retrievals'
     )
 
+    # FAR (Future-Aligned Retrieval) vs RAFT baseline
+    parser.add_argument('--far', action='store_true', default=False,
+                        help='enable FAR: blend a future-trend similarity into RAFT retrieval')
+    parser.add_argument('--raft', action='store_true', default=False,
+                        help='run the vanilla RAFT baseline (no future similarity)')
+    parser.add_argument('--far_alpha', type=float, default=0.2,
+                        help='blend weight for future similarity; 0 == pure RAFT')
+    parser.add_argument('--far_dim', type=int, default=64,
+                        help='FAR future-trend encoder embedding dim')
+    parser.add_argument('--far_epochs', type=int, default=10,
+                        help='FAR encoder offline training epochs')
+    parser.add_argument('--far_lr', type=float, default=1e-3,
+                        help='FAR encoder learning rate')
+
     # optimization
     parser.add_argument('--num_workers', type=int, default=10, help='data loader num workers')
     parser.add_argument('--itr', type=int, default=1, help='experiments times')
@@ -142,6 +156,18 @@ if __name__ == '__main__':
     parser.add_argument('--extra_tag', type=str, default="", help="Anything extra")
 
     args = parser.parse_args()
+
+    # Resolve run variant: FAR (RAFT + future similarity) vs RAFT baseline.
+    if args.far and args.raft:
+        raise ValueError('Choose only one of --far or --raft, not both.')
+    args.use_far = bool(args.far)
+    if args.raft or not args.far:
+        # Vanilla RAFT baseline: no future similarity blending.
+        args.use_far = False
+        args.far_alpha = 0.0
+    args.variant = 'FAR' if args.use_far else 'RAFT'
+    print('Run variant: {} (far_alpha={})'.format(args.variant, args.far_alpha))
+
     # args.use_gpu = True if torch.cuda.is_available() and args.use_gpu else False
     args.use_gpu = True if torch.cuda.is_available() else False
 
@@ -185,7 +211,7 @@ if __name__ == '__main__':
                 args.factor,
                 args.embed,
                 args.distil,
-                args.des, ii)
+                args.des + '_' + args.variant, ii)
 
             print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
             exp.train(setting)
@@ -214,7 +240,7 @@ if __name__ == '__main__':
             args.factor,
             args.embed,
             args.distil,
-            args.des, ii)
+            args.des + '_' + args.variant, ii)
 
         exp = Exp(args)  # set experiments
         print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
