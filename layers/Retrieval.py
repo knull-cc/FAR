@@ -59,6 +59,10 @@ class RetrievalTool():
         # is the future-aligned retrieval key, not the fusion. Exposed as a
         # knob purely for studying fusion sharpness.
         self.far_fuse_temperature = far_config.get('fuse_temperature', 0.1)
+        # How much future-aligned similarity to blend into RAFT's correlation
+        # key. 0 => exactly RAFT; small values add the past<->future alignment
+        # signal on top of RAFT (FAR is additive, not a replacement).
+        self.far_blend_alpha = far_config.get('blend_alpha', 0.3)
         self.x_mark_all = None
         self.far = None
         if self.use_far:
@@ -222,21 +226,26 @@ class RetrievalTool():
         bsz, seq_len, channels = x.shape
         assert seq_len == self.seq_len and channels == self.channels
 
-        if self.use_far:
-            # FAR: future-aligned embedding similarity (replaces past-corr key).
-            # Decompose the query into the same multi-grain views the KB index
-            # was built on, then retrieve a separate future-aligned ranking per
-            # grain (mirrors RAFT's per-grain correlation key).
-            x_mg, _ = self.decompose_mg(x)  # G, B, S, C
-            cov = x_mark if (self.use_covariates and x_mark is not None) else None
-            sim = self.far.query_similarity(x_mg, cov, device=x.device)  # G, B, T
-        else:
-            x_mg, mg_offset = self.decompose_mg(x) # G, B, S, C
+        x_mg, mg_offset = self.decompose_mg(x)  # G, B, S, C
 
-            sim = self.periodic_batch_corr(
-                self.train_data_all_mg.flatten(start_dim=2), # G, T, S * C
-                x_mg.flatten(start_dim=2), # G, B, S * C
-            ) # G, B, T
+        # RAFT's per-grain past-correlation key (the strong base signal).
+        corr_sim = self.periodic_batch_corr(
+            self.train_data_all_mg.flatten(start_dim=2),  # G, T, S * C
+            x_mg.flatten(start_dim=2),                    # G, B, S * C
+        )  # G, B, T
+
+        if self.use_far:
+            # FAR is ADDITIVE on top of RAFT: keep RAFT's correlation key and
+            # blend in the future-aligned similarity (past<->future alignment).
+            # With far_blend_alpha -> 0 this is exactly RAFT (so FAR can only
+            # help, not hurt); a small alpha nudges the ranking toward neighbors
+            # whose futures align, on top of RAFT's strong base.
+            cov = x_mark if (self.use_covariates and x_mark is not None) else None
+            far_sim = self.far.query_similarity(x_mg, cov, device=x.device)  # G, B, T
+            alpha = self.far_blend_alpha
+            sim = (1.0 - alpha) * corr_sim + alpha * far_sim
+        else:
+            sim = corr_sim
             
         if train:
             sliding_index = torch.arange(2 * (self.seq_len + self.pred_len) - 1).to(x.device)

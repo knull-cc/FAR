@@ -6,7 +6,7 @@ model_id_name=ETTh1
 data_name=ETTh1
 
 seq_len=96
-for pred_len in 96 192 336 720
+for pred_len in 96
 do
 for random_seed in 2024
 do

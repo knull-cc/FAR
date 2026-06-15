@@ -107,6 +107,10 @@ if __name__ == '__main__':
                         help='weight of the auxiliary future-trend regression loss '
                              '(train-only; distills future-trend info into the past '
                              'embedding; 0 disables)')
+    parser.add_argument('--far_blend_alpha', type=float, default=0.3,
+                        help='blend weight of the future-aligned similarity on top of '
+                             "RAFT's correlation key: sim=(1-a)*corr+a*far. 0 == exactly "
+                             'RAFT (FAR is additive, so it can only help); try 0.1-0.5')
     parser.add_argument('--far_future_metric', type=str, default='shape',
                         help='A1: future-similarity metric [shape|euclid|corr|softdtw|slope]')
     parser.add_argument('--far_soft_dtw_gamma', type=float, default=0.1, help='soft-DTW smoothing')
