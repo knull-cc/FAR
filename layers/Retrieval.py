@@ -269,14 +269,20 @@ class RetrievalTool():
 
         # B4 gating: expose the top-k retrieval similarities (confidence) of the
         # future-aligned ranking so the host can learn a confidence-aware gate.
+        topk_vals = topm.values.reshape(self.n_period, bsz, self.topm)
         topk_sims = None
         if self.use_far and self.far_config.get('use_gating', False):
-            topk_vals = topm.values.reshape(self.n_period, bsz, self.topm)
-            topk_sims = topk_vals[0].detach().cpu()  # B, topm (grains share ranking)
+            topk_sims = topk_vals[0].detach().cpu()  # B, topm
 
-        return pred_from_retrieval, topk_sims
+        # Retrieval-quality diagnostic: the top-m similarity values that drive
+        # the softmax fusion weights. If these are high but collapsed (tiny
+        # gap), the softmax degenerates to a uniform average of the top-m
+        # futures -> over-smoothed prediction -> higher MSE.
+        topm_diag = topk_vals[-1].detach().cpu()  # finest grain (g=1), B, topm
+
+        return pred_from_retrieval, topk_sims, topm_diag
     
-    def retrieve_all(self, data, train=False, device=torch.device('cpu')):
+    def retrieve_all(self, data, train=False, device=torch.device('cpu'), tag=''):
         assert self.train_data_all_mg is not None
         
         rt_loader = DataLoader(
@@ -289,9 +295,10 @@ class RetrievalTool():
         
         retrievals = []
         topk_sims_all = []
+        topm_diag_all = []
         with torch.no_grad():
             for index, batch_x, batch_y, batch_x_mark, batch_y_mark in tqdm(rt_loader):
-                pred_from_retrieval, topk_sims = self.retrieve(
+                pred_from_retrieval, topk_sims, topm_diag = self.retrieve(
                     batch_x.float().to(device), index, train=train,
                     x_mark=batch_x_mark.float().to(device),
                 )
@@ -299,8 +306,19 @@ class RetrievalTool():
                 retrievals.append(pred_from_retrieval)
                 if topk_sims is not None:
                     topk_sims_all.append(topk_sims)
+                topm_diag_all.append(topm_diag)
                 
         retrievals = torch.cat(retrievals, dim=1)
+
+        # Print the retrieval-quality diagnostic for this split.
+        diag = torch.cat(topm_diag_all, dim=0)  # n_samples, topm
+        key = 'FAR' if self.use_far else 'corr'
+        print(
+            f"[retrieval-diag][{key}][{tag or ('train' if train else 'eval')}] "
+            f"top-m sim mean={diag.mean():.4f} std={diag.std():.4f} "
+            f"top1={diag[:, 0].mean():.4f} topm={diag[:, -1].mean():.4f} "
+            f"gap(top1-topm)={ (diag[:, 0] - diag[:, -1]).mean():.4f}"
+        )
 
         if len(topk_sims_all) > 0:
             topk_sims_all = torch.cat(topk_sims_all, dim=0)  # n_samples, topm

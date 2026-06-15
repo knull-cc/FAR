@@ -101,13 +101,13 @@ class Model(nn.Module):
         self.retrieval_dict = {}
         
         print('Doing Train Retrieval')
-        train_rt, train_sims = self.rt.retrieve_all(train_data, train=True, device=self.device)
+        train_rt, train_sims = self.rt.retrieve_all(train_data, train=True, device=self.device, tag='train')
 
         print('Doing Valid Retrieval')
-        valid_rt, valid_sims = self.rt.retrieve_all(valid_data, train=False, device=self.device)
+        valid_rt, valid_sims = self.rt.retrieve_all(valid_data, train=False, device=self.device, tag='valid')
 
         print('Doing Test Retrieval')
-        test_rt, test_sims = self.rt.retrieve_all(test_data, train=False, device=self.device)
+        test_rt, test_sims = self.rt.retrieve_all(test_data, train=False, device=self.device, tag='test')
 
         del self.rt
         if torch.cuda.is_available():
