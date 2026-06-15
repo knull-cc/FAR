@@ -96,6 +96,10 @@ if __name__ == '__main__':
     parser.add_argument('--far_dropout', type=float, default=0.1, help='FAR encoder dropout')
     parser.add_argument('--far_use_revin', type=int, default=1, help='A3: RevIN in FAR encoder')
     parser.add_argument('--far_temperature', type=float, default=0.1, help='InfoNCE temperature')
+    parser.add_argument('--far_fuse_temperature', type=float, default=0.05,
+                        help='softmax temperature for the FAR retrieval-fusion weights '
+                             '(smaller = sharper; FAR cosine sims are compressed vs '
+                             'correlation, so this is ~half the corr-key temperature)')
     parser.add_argument('--far_pos_k', type=int, default=5,
                         help='A1: #future-nearest neighbors treated as positives')
     parser.add_argument('--far_future_metric', type=str, default='shape',
