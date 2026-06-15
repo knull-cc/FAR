@@ -43,23 +43,23 @@ class RetrievalTool():
         self.kb_emb = None
 
     def set_future_encoder(self, future_encoder, far_alpha, device):
-        """Attach a trained future-trend encoder and precompute KB embeddings.
+        """Attach a trained future-trend encoder and precompute KB futures.
 
-        KB embeddings are the (normalized) encoder embeddings of every past
-        window in the retrieval database, used to compute the cosine `far_sim`.
+        `far_sim` ranks each KB item by how well its *actual* future matches the
+        query's *predicted* future. We therefore precompute the per-channel,
+        instance-normalized, L2-normalized actual future of every KB entry so
+        the query-time score is a plain cosine (== correlation of shapes).
+        Using KB actual futures is leakage-free: they are training-set targets
+        already used by RAFT as retrieved predictions; the query's own future is
+        never touched.
         """
         self.future_encoder = future_encoder
         self.far_alpha = far_alpha
 
-        self.future_encoder.eval()
-        embs = []
-        in_bsz = 1024
-        with torch.no_grad():
-            for i in range(0, self.train_data_all.shape[0], in_bsz):
-                chunk = self.train_data_all[i:i + in_bsz].to(device)  # b, S, C
-                emb = self.future_encoder.embed(chunk)                # b, D
-                embs.append(F.normalize(emb, dim=-1).cpu())
-        self.kb_emb = torch.cat(embs, dim=0)  # T, D (normalized)
+        fut = self.y_data_all.permute(0, 2, 1)             # T, C, P
+        fut = fut - fut.mean(dim=-1, keepdim=True)         # instance-norm (shape)
+        fut = F.normalize(fut, dim=-1)                     # per-channel unit vec
+        self.kb_future = fut.reshape(fut.shape[0], -1).contiguous()  # T, C*P
 
     def prepare_dataset(self, train_data):
         train_data_all = []
@@ -144,14 +144,18 @@ class RetrievalTool():
             x_mg.flatten(start_dim=2), # G, B, S * C
         ) # G, B, T
 
-        # FAR: blend (not replace) future-aligned cosine similarity into the
-        # RAFT correlation. far_alpha == 0 -> identical to RAFT.
+        # FAR: blend (not replace) a future-aligned similarity into the RAFT
+        # correlation. far_sim = mean per-channel cosine between the query's
+        # predicted future and each KB item's actual future. far_alpha == 0 ->
+        # identical to RAFT.
         if self.far_alpha > 0 and self.future_encoder is not None:
             with torch.no_grad():
-                q_emb = self.future_encoder.embed(x)        # B, D
-                q_emb = F.normalize(q_emb, dim=-1)
-            far_sim = torch.matmul(q_emb, self.kb_emb.to(x.device).t())  # B, T
-            far_sim = far_sim.unsqueeze(0)                  # 1, B, T (broadcast over G)
+                q_fut = self.future_encoder.predict(x)      # B, C, P
+                q_fut = q_fut - q_fut.mean(dim=-1, keepdim=True)
+                q_fut = F.normalize(q_fut, dim=-1)          # per-channel unit vec
+                q_fut = q_fut.reshape(bsz, -1)              # B, C*P
+            far_sim = torch.matmul(q_fut, self.kb_future.to(x.device).t())  # B, T
+            far_sim = (far_sim / channels).unsqueeze(0)     # mean over C; 1,B,T
             sim = (1.0 - self.far_alpha) * sim + self.far_alpha * far_sim
 
         if train:

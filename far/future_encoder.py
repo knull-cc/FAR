@@ -55,6 +55,15 @@ class FutureTrendEncoder(nn.Module):
         e = self._encode_channels(x)      # B, C, D
         return e.mean(dim=1)              # mean-pool channels -> B, D
 
+    def predict(self, x):
+        """Past window (B, S, C) -> predicted (normalized) future (B, C, P).
+
+        This is the regression-head forecast of the future *trend/shape*. It is
+        used at retrieval time to align against KB items' actual futures.
+        """
+        e = self._encode_channels(x)      # B, C, D
+        return self.head(e)               # B, C, P
+
     def forward(self, x):
         """Returns (predicted_normalized_future (B, C, P), embedding (B, D))."""
         e = self._encode_channels(x)      # B, C, D

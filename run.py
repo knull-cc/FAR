@@ -26,7 +26,7 @@ if __name__ == '__main__':
 
     # data loader
     parser.add_argument('--data', type=str, default='ETTh1', help='dataset type')
-    parser.add_argument('--root_path', type=str, default='./data/ETT/', help='root path of the data file')
+    parser.add_argument('--root_path', type=str, default='./dataset/ETT-small/', help='root path of the data file')
     parser.add_argument('--data_path', type=str, default='ETTh1.csv', help='data file')
     parser.add_argument('--features', type=str, default='M',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
@@ -99,7 +99,7 @@ if __name__ == '__main__':
                         help='enable FAR: blend a future-trend similarity into RAFT retrieval')
     parser.add_argument('--raft', action='store_true', default=False,
                         help='run the vanilla RAFT baseline (no future similarity)')
-    parser.add_argument('--far_alpha', type=float, default=0.2,
+    parser.add_argument('--far_alpha', type=float, default=0.1,
                         help='blend weight for future similarity; 0 == pure RAFT')
     parser.add_argument('--far_dim', type=int, default=64,
                         help='FAR future-trend encoder embedding dim')
