@@ -209,7 +209,7 @@ class RetrievalTool():
         index = index.to(x.device)
         
         bsz, seq_len, channels = x.shape
-        assert(seq_len == self.seq_len, channels == self.channels)
+        assert seq_len == self.seq_len and channels == self.channels
 
         if self.use_far:
             # FAR: future-aligned embedding similarity (replaces past-corr key).

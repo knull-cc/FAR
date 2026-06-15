@@ -122,18 +122,20 @@ class Model(nn.Module):
             self.topk_sims_dict['test'] = test_sims
 
     def encoder(self, x, index, mode):
-        index = index.to(self.device)
+        # retrieval_dict is precomputed on CPU to avoid keeping the full
+        # retrieval cache on GPU. Index it on CPU, then move only this batch.
+        index_cpu = index.to('cpu', dtype=torch.long)
+        device = x.device
         
         bsz, seq_len, channels = x.shape
-        assert(seq_len == self.seq_len, channels == self.channels)
+        assert seq_len == self.seq_len and channels == self.channels
         
         x_offset = x[:, -1:, :].detach()
         x_norm = x - x_offset
 
         x_pred_from_x = self.linear_x(x_norm.permute(0, 2, 1)).permute(0, 2, 1) # B, P, C
         
-        pred_from_retrieval = self.retrieval_dict[mode][:, index] # G, B, P, C
-        pred_from_retrieval = pred_from_retrieval.to(self.device)
+        pred_from_retrieval = self.retrieval_dict[mode][:, index_cpu].to(device) # G, B, P, C
         
         retrieval_pred_list = []
         
@@ -155,7 +157,7 @@ class Model(nn.Module):
         # B4: down-weight retrieval when no confidently future-aligned neighbor
         # exists (novel regime), up-weight when retrieval is confident.
         if self.use_gating and self.gate is not None:
-            topk_sims = self.topk_sims_dict[mode][index.cpu()].to(self.device)  # B, topm
+            topk_sims = self.topk_sims_dict[mode][index_cpu].to(device)  # B, topm
             gate_w = self.gate(topk_sims)  # B, 1
             retrieval_pred_list = retrieval_pred_list * gate_w.unsqueeze(1)
         
